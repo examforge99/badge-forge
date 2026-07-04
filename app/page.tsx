@@ -1,9 +1,5 @@
-import PolygonEditor from "@/components/PolygonEditor";
+import CanvasEditor from "@/components/CanvasEditor";
 
 export default function Home() {
-  return (
-    <main className="min-h-screen flex items-center justify-center bg-black">
-      <PolygonEditor />
-    </main>
-  );
+  return <CanvasEditor />;
 }
