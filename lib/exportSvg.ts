@@ -1,5 +1,7 @@
 import { CanvasState } from "@/types/canvas";
 
+const EXPORT_SCALE = 20;
+
 export function canvasStateToSvgString(state: CanvasState): string {
   const shapes = Object.values(state.shapes);
 
@@ -7,7 +9,6 @@ export function canvasStateToSvgString(state: CanvasState): string {
     return `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"></svg>`;
   }
 
-  // Find bounding box across all vertices actually used by shapes
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const shape of shapes) {
     for (const vid of shape.vertexIds) {
@@ -20,18 +21,20 @@ export function canvasStateToSvgString(state: CanvasState): string {
     }
   }
 
-  const padding = 5;
+  const padding = 2;
   minX -= padding;
   minY -= padding;
   maxX += padding;
   maxY += padding;
 
-  const width = maxX - minX;
-  const height = maxY - minY;
+  const width = (maxX - minX) * EXPORT_SCALE;
+  const height = (maxY - minY) * EXPORT_SCALE;
 
-  // Flip y for screen-space SVG (model space has +y up, SVG has +y down)
   function toSvgCoords(x: number, y: number) {
-    return { sx: x - minX, sy: maxY - y };
+    return {
+      sx: (x - minX) * EXPORT_SCALE,
+      sy: (maxY - y) * EXPORT_SCALE,
+    };
   }
 
   const pathElements = shapes
@@ -49,7 +52,7 @@ export function canvasStateToSvgString(state: CanvasState): string {
       ];
       if (shape.closed) d.push("Z");
 
-      return `<path d="${d.join(" ")}" fill="${shape.fill}" stroke="${shape.stroke}" stroke-width="1" />`;
+      return `<path d="${d.join(" ")}" fill="${shape.fill}" stroke="${shape.stroke}" stroke-width="${EXPORT_SCALE / 10}" />`;
     })
     .join("\n  ");
 
