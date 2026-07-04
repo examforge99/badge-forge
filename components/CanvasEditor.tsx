@@ -1,4 +1,4 @@
- "use client";
+"use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { CanvasState, Draft } from "@/types/canvas";
@@ -19,6 +19,9 @@ import {
   saveProject,
   ProjectSummary,
 } from "@/lib/projects";
+import { downloadSvg } from "@/lib/exportSvg";
+
+const LAST_PROJECT_KEY = "badge-forge-last-project";
 
 function isPointInPolygon(
   px: number,
@@ -95,6 +98,7 @@ export default function CanvasEditor() {
         setState(fresh);
         setHistory(createHistory());
         setSelected([]);
+        localStorage.setItem(LAST_PROJECT_KEY, id);
       } catch {
         showNotice("Could not create a new project.");
       }
@@ -121,24 +125,49 @@ export default function CanvasEditor() {
         setHistory(createHistory());
         setSelected([]);
         setProjectMenuOpen(false);
+        localStorage.setItem(LAST_PROJECT_KEY, id);
       } catch {
         showNotice("Could not open that project.");
       }
     });
   }
 
-  useEffect(() => {
-    if (!projectId) {
-      handleNewProject();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function handlePlacePreset(presetKey: string) {
+  function handleExport() {
     runCommand(() => {
-      commitStateChange(placePreset(state, presetKey));
+      downloadSvg(state, projectName || "badge");
     });
   }
+
+  // Initial load: reopen the last project you had open, or create one.
+  // Bypasses runCommand deliberately — nothing can be pending on first mount.
+  useEffect(() => {
+    async function initialLoad() {
+      const lastId = localStorage.getItem(LAST_PROJECT_KEY);
+      if (lastId) {
+        try {
+          const { name, state: loadedState } = await loadProject(lastId);
+          setProjectId(lastId);
+          setProjectName(name);
+          setState(loadedState);
+          return;
+        } catch {
+          // saved id no longer valid (e.g. deleted project) — fall through
+        }
+      }
+      const fresh = createEmptyState();
+      try {
+        const id = await createProject("Untitled Badge", fresh);
+        setProjectId(id);
+        setProjectName("Untitled Badge");
+        setState(fresh);
+        localStorage.setItem(LAST_PROJECT_KEY, id);
+      } catch {
+        showNotice("Could not create a new project.");
+      }
+    }
+    initialLoad();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handleUndo() {
     runCommand(() => {
@@ -335,6 +364,13 @@ export default function CanvasEditor() {
     setViewport((vp) => ({ ...vp, scale: Math.max(2, Math.min(40, vp.scale + delta)) }));
   }
 
+
+ function handlePlacePreset(presetKey: string) {
+  runCommand(() => {
+    commitStateChange(placePreset(state, presetKey));
+  });
+ }
+ 
   function vertexPointerDown(e: React.PointerEvent, vertexId: string) {
     e.stopPropagation();
     longPressTimer.current = window.setTimeout(() => {
@@ -428,6 +464,9 @@ export default function CanvasEditor() {
           </button>
           <button onClick={handleOpenProjectList} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">
             Open
+          </button>
+          <button onClick={handleExport} className="px-3 py-2 bg-emerald-600 text-white text-sm rounded">
+            Export
           </button>
           <span className="px-2 text-sm text-neutral-600 truncate max-w-[120px]">{projectName}</span>
         </div>
@@ -534,4 +573,4 @@ export default function CanvasEditor() {
       )}
     </div>
   );
-        }
+     }
