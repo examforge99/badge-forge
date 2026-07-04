@@ -1,6 +1,6 @@
-"use client";
+ "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { CanvasState, Draft } from "@/types/canvas";
 import { PRESETS } from "@/lib/presets";
 import {
@@ -12,6 +12,13 @@ import {
   translateShape,
 } from "@/lib/canvasEngine";
 import { createHistory, pushHistory, undo, redo, HistoryStack } from "@/lib/history";
+import {
+  listProjects,
+  createProject,
+  loadProject,
+  saveProject,
+  ProjectSummary,
+} from "@/lib/projects";
 
 function isPointInPolygon(
   px: number,
@@ -38,6 +45,11 @@ export default function CanvasEditor() {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [shapeMenuOpen, setShapeMenuOpen] = useState(false);
+
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [projectName, setProjectName] = useState<string>("Untitled Badge");
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
 
   const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 8 });
   const panStart = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
@@ -66,7 +78,61 @@ export default function CanvasEditor() {
   function commitStateChange(newState: CanvasState) {
     setHistory((h) => pushHistory(h, state));
     setState(newState);
+    if (projectId) {
+      saveProject(projectId, newState).catch(() =>
+        showNotice("Save failed — check your connection.")
+      );
+    }
   }
+
+  async function handleNewProject() {
+    runCommand(async () => {
+      const fresh = createEmptyState();
+      try {
+        const id = await createProject("Untitled Badge", fresh);
+        setProjectId(id);
+        setProjectName("Untitled Badge");
+        setState(fresh);
+        setHistory(createHistory());
+        setSelected([]);
+      } catch {
+        showNotice("Could not create a new project.");
+      }
+    });
+  }
+
+  async function handleOpenProjectList() {
+    try {
+      const list = await listProjects();
+      setProjects(list);
+      setProjectMenuOpen(true);
+    } catch {
+      showNotice("Could not load your projects.");
+    }
+  }
+
+  async function handleOpenProject(id: string) {
+    runCommand(async () => {
+      try {
+        const { name, state: loadedState } = await loadProject(id);
+        setProjectId(id);
+        setProjectName(name);
+        setState(loadedState);
+        setHistory(createHistory());
+        setSelected([]);
+        setProjectMenuOpen(false);
+      } catch {
+        showNotice("Could not open that project.");
+      }
+    });
+  }
+
+  useEffect(() => {
+    if (!projectId) {
+      handleNewProject();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handlePlacePreset(presetKey: string) {
     runCommand(() => {
@@ -84,6 +150,11 @@ export default function CanvasEditor() {
       setHistory(result.history);
       setState(result.state);
       setSelected([]);
+      if (projectId) {
+        saveProject(projectId, result.state).catch(() =>
+          showNotice("Save failed — check your connection.")
+        );
+      }
     });
   }
 
@@ -97,6 +168,11 @@ export default function CanvasEditor() {
       setHistory(result.history);
       setState(result.state);
       setSelected([]);
+      if (projectId) {
+        saveProject(projectId, result.state).catch(() =>
+          showNotice("Save failed — check your connection.")
+        );
+      }
     });
   }
 
@@ -122,7 +198,9 @@ export default function CanvasEditor() {
   function handleLongPressVertex(vertexId: string) {
     runCommand(() => {
       setSelected((prev) => {
-        if (prev.includes(vertexId)) return prev;
+        if (prev.includes(vertexId)) {
+          return prev.filter((id) => id !== vertexId);
+        }
         const next = [...prev, vertexId];
         return next.length > 2 ? next.slice(1) : next;
       });
@@ -218,13 +296,22 @@ export default function CanvasEditor() {
     setViewport((vp) => ({ ...vp, x: panStart.current!.vx + dx, y: panStart.current!.vy + dy }));
   }
 
-  function handleBackgroundPointerUp() {
+  function handleBackgroundPointerUp(e: React.PointerEvent) {
     if (shapeDrag.current) {
       commitStateChange(state);
       shapeDrag.current = null;
       return;
     }
-    panStart.current = null;
+    if (panStart.current) {
+      const dx = e.clientX - panStart.current.x;
+      const dy = e.clientY - panStart.current.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      const wasTap = distance < 5;
+      panStart.current = null;
+      if (wasTap && draft === null && selected.length > 0) {
+        setSelected([]);
+      }
+    }
   }
 
   function shapeBodyPointerDown(e: React.PointerEvent, shapeId: string) {
@@ -241,7 +328,7 @@ export default function CanvasEditor() {
       window.clearTimeout(longPressTimer.current);
       longPressTimer.current = null;
     }
-    handleBackgroundPointerUp();
+    handleBackgroundPointerUp(e);
   }
 
   function handleZoom(delta: number) {
@@ -329,14 +416,23 @@ export default function CanvasEditor() {
       </div>
 
       <div className="bg-neutral-100 border-t border-neutral-300 p-3 flex flex-col gap-3 relative">
-        <div className="flex gap-2 flex-wrap">
+        <div className="flex gap-2 flex-wrap items-center">
           <button
             onClick={() => setShapeMenuOpen((v) => !v)}
             className="px-3 py-2 bg-indigo-600 text-white text-sm rounded"
           >
             Shapes ▾
           </button>
+          <button onClick={handleNewProject} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">
+            New
+          </button>
+          <button onClick={handleOpenProjectList} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">
+            Open
+          </button>
+          <span className="px-2 text-sm text-neutral-600 truncate max-w-[120px]">{projectName}</span>
+        </div>
 
+        <div className="flex gap-2 flex-wrap">
           <button onClick={handleUndo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Undo</button>
           <button onClick={handleRedo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Redo</button>
           <button onClick={handleMerge} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Merge</button>
@@ -408,6 +504,34 @@ export default function CanvasEditor() {
           </div>
         </div>
       )}
+
+      {projectMenuOpen && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-end z-50"
+          onClick={() => setProjectMenuOpen(false)}
+        >
+          <div
+            className="bg-white w-full rounded-t-2xl p-4 flex flex-col gap-2 max-h-[60vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-neutral-500 text-xs uppercase tracking-wide mb-1">
+              Your projects
+            </div>
+            {projects.length === 0 && (
+              <div className="text-neutral-400 text-sm px-4 py-3">No saved projects yet.</div>
+            )}
+            {projects.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => handleOpenProject(p.id)}
+                className="text-left px-4 py-3 bg-neutral-100 hover:bg-neutral-200 rounded-lg text-neutral-900"
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
-}
+        }
