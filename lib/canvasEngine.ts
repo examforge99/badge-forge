@@ -145,6 +145,85 @@ export function mergeVertices(
   return next;
 }
 
+// Split a shared vertex back into independent vertices, one per shape
+// that currently references it. All new vertices start stacked at the
+// same coordinates as the original. If only one shape references it,
+// there's nothing to split, so the state is returned unchanged.
+export function splitVertex(
+  state: CanvasState,
+  vertexId: string
+): CanvasState {
+  const sharingShapeIds = Object.values(state.shapes)
+    .filter((shape) => shape.vertexIds.includes(vertexId))
+    .map((shape) => shape.id);
+
+  if (sharingShapeIds.length <= 1) return state;
+
+  const original = state.vertices[vertexId];
+  if (!original) return state;
+
+  const newVertices: Record<string, Vertex> = { ...state.vertices };
+  const newShapes: Record<string, ShapeInstance> = { ...state.shapes };
+
+  for (const shapeId of sharingShapeIds) {
+    const freshId = nextId("v");
+    newVertices[freshId] = { id: freshId, x: original.x, y: original.y };
+
+    const shape = newShapes[shapeId];
+    newShapes[shapeId] = {
+      ...shape,
+      vertexIds: shape.vertexIds.map((vid) =>
+        vid === vertexId ? freshId : vid
+      ),
+    };
+  }
+
+  let next: CanvasState = { vertices: newVertices, shapes: newShapes };
+  next = garbageCollectVertices(next);
+  return next;
+}
+
+// How many shapes currently reference this vertex. Used to decide
+// whether "Split" should be offered for a selected vertex.
+export function countShapesSharingVertex(
+  state: CanvasState,
+  vertexId: string
+): number {
+  return Object.values(state.shapes).filter((shape) =>
+    shape.vertexIds.includes(vertexId)
+  ).length;
+}
+
+// Find every shape transitively connected to the given shape via shared
+// vertices — i.e. its connected component in the vertex-sharing graph.
+// Used so dragging one shape in a fused cluster drags the whole cluster.
+export function findConnectedShapes(
+  state: CanvasState,
+  startShapeId: string
+): string[] {
+  const visited = new Set<string>();
+  const queue: string[] = [startShapeId];
+
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    if (visited.has(currentId)) continue;
+    visited.add(currentId);
+
+    const currentShape = state.shapes[currentId];
+    if (!currentShape) continue;
+
+    for (const vid of currentShape.vertexIds) {
+      for (const [otherId, otherShape] of Object.entries(state.shapes)) {
+        if (!visited.has(otherId) && otherShape.vertexIds.includes(vid)) {
+          queue.push(otherId);
+        }
+      }
+    }
+  }
+
+  return Array.from(visited);
+}
+
 export function translateShape(
   state: CanvasState,
   shapeId: string,
@@ -163,3 +242,32 @@ export function translateShape(
   }
   return { ...state, vertices: newVertices };
 }
+
+// Translate every shape in a shape's connected component together,
+// as one rigid unit — this is what a fused multi-shape badge drag uses.
+export function translateConnectedShapes(
+  state: CanvasState,
+  startShapeId: string,
+  dx: number,
+  dy: number
+): CanvasState {
+  const connectedIds = findConnectedShapes(state, startShapeId);
+  const vertexIdsToMove = new Set<string>();
+
+  for (const shapeId of connectedIds) {
+    const shape = state.shapes[shapeId];
+    if (!shape) continue;
+    for (const vid of shape.vertexIds) {
+      vertexIdsToMove.add(vid);
+    }
+  }
+
+  const newVertices = { ...state.vertices };
+  for (const vid of vertexIdsToMove) {
+    const v = newVertices[vid];
+    if (v) {
+      newVertices[vid] = { ...v, x: v.x + dx, y: v.y + dy };
+    }
+  }
+  return { ...state, vertices: newVertices };
+         }
