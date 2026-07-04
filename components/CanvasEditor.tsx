@@ -2,14 +2,15 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { CanvasState, Draft } from "@/types/canvas";
-import { PRESETS } from "@/lib/presets";
 import {
   createEmptyState,
   placePreset,
   moveVertex,
   deleteVertex,
   mergeVertices,
-  translateShape,
+  splitVertex,
+  countShapesSharingVertex,
+  translateConnectedShapes,
 } from "@/lib/canvasEngine";
 import { createHistory, pushHistory, undo, redo, HistoryStack } from "@/lib/history";
 import {
@@ -20,6 +21,7 @@ import {
   ProjectSummary,
 } from "@/lib/projects";
 import { downloadSvg } from "@/lib/exportSvg";
+import EditorDrawer from "@/components/EditorDrawer";
 
 const LAST_PROJECT_KEY = "badge-forge-last-project";
 
@@ -47,11 +49,10 @@ export default function CanvasEditor() {
   const [selected, setSelected] = useState<string[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [shapeMenuOpen, setShapeMenuOpen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   const [projectId, setProjectId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState<string>("Untitled Badge");
-  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
 
   const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 8 });
@@ -88,6 +89,15 @@ export default function CanvasEditor() {
     }
   }
 
+  async function refreshProjectList() {
+    try {
+      const list = await listProjects();
+      setProjects(list);
+    } catch {
+      // silent — drawer just shows whatever it last had
+    }
+  }
+
   async function handleNewProject() {
     runCommand(async () => {
       const fresh = createEmptyState();
@@ -99,20 +109,11 @@ export default function CanvasEditor() {
         setHistory(createHistory());
         setSelected([]);
         localStorage.setItem(LAST_PROJECT_KEY, id);
+        refreshProjectList();
       } catch {
         showNotice("Could not create a new project.");
       }
     });
-  }
-
-  async function handleOpenProjectList() {
-    try {
-      const list = await listProjects();
-      setProjects(list);
-      setProjectMenuOpen(true);
-    } catch {
-      showNotice("Could not load your projects.");
-    }
   }
 
   async function handleOpenProject(id: string) {
@@ -124,7 +125,6 @@ export default function CanvasEditor() {
         setState(loadedState);
         setHistory(createHistory());
         setSelected([]);
-        setProjectMenuOpen(false);
         localStorage.setItem(LAST_PROJECT_KEY, id);
       } catch {
         showNotice("Could not open that project.");
@@ -138,8 +138,12 @@ export default function CanvasEditor() {
     });
   }
 
-  // Initial load: reopen the last project you had open, or create one.
-  // Bypasses runCommand deliberately — nothing can be pending on first mount.
+  function handlePlacePreset(presetKey: string) {
+    runCommand(() => {
+      commitStateChange(placePreset(state, presetKey));
+    });
+  }
+
   useEffect(() => {
     async function initialLoad() {
       const lastId = localStorage.getItem(LAST_PROJECT_KEY);
@@ -149,9 +153,10 @@ export default function CanvasEditor() {
           setProjectId(lastId);
           setProjectName(name);
           setState(loadedState);
+          refreshProjectList();
           return;
         } catch {
-          // saved id no longer valid (e.g. deleted project) — fall through
+          // saved id no longer valid — fall through to creating a new one
         }
       }
       const fresh = createEmptyState();
@@ -161,6 +166,7 @@ export default function CanvasEditor() {
         setProjectName("Untitled Badge");
         setState(fresh);
         localStorage.setItem(LAST_PROJECT_KEY, id);
+        refreshProjectList();
       } catch {
         showNotice("Could not create a new project.");
       }
@@ -214,13 +220,17 @@ export default function CanvasEditor() {
 
   function handleMerge() {
     runCommand(() => {
-      if (selected.length !== 2) {
-        showNotice("Select two vertices to merge.");
-        return;
-      }
+      if (selected.length !== 2) return;
       const [first, second] = selected;
       commitStateChange(mergeVertices(state, first, second));
       setSelected([first]);
+    });
+  }
+
+  function handleSplit(vertexId: string) {
+    runCommand(() => {
+      commitStateChange(splitVertex(state, vertexId));
+      setSelected([]);
     });
   }
 
@@ -238,10 +248,7 @@ export default function CanvasEditor() {
 
   function startDraftForSelected() {
     runCommand(() => {
-      if (selected.length === 0) {
-        showNotice("Long-press a vertex first.");
-        return;
-      }
+      if (selected.length === 0) return;
       const vertexId = selected[selected.length - 1];
       const v = state.vertices[vertexId];
       if (!v) return;
@@ -313,7 +320,7 @@ export default function CanvasEditor() {
       const dx = mx - shapeDrag.current.lastModelX;
       const dy = my - shapeDrag.current.lastModelY;
       if (dx !== 0 || dy !== 0) {
-        setState((s) => translateShape(s, shapeDrag.current!.shapeId, dx, dy));
+        setState((s) => translateConnectedShapes(s, shapeDrag.current!.shapeId, dx, dy));
         shapeDrag.current.lastModelX = mx;
         shapeDrag.current.lastModelY = my;
       }
@@ -364,13 +371,6 @@ export default function CanvasEditor() {
     setViewport((vp) => ({ ...vp, scale: Math.max(2, Math.min(40, vp.scale + delta)) }));
   }
 
-
- function handlePlacePreset(presetKey: string) {
-  runCommand(() => {
-    commitStateChange(placePreset(state, presetKey));
-  });
- }
- 
   function vertexPointerDown(e: React.PointerEvent, vertexId: string) {
     e.stopPropagation();
     longPressTimer.current = window.setTimeout(() => {
@@ -386,6 +386,11 @@ export default function CanvasEditor() {
     }
   }
 
+  const oneSelected = selected.length === 1 ? selected[0] : null;
+  const twoSelected = selected.length === 2;
+  const sharingCount = oneSelected ? countShapesSharingVertex(state, oneSelected) : 0;
+  const canSplit = oneSelected !== null && sharingCount > 1;
+
   return (
     <div className="w-full h-screen bg-white flex flex-col">
       {notice && (
@@ -394,6 +399,78 @@ export default function CanvasEditor() {
         </div>
       )}
 
+      {/* Top grid */}
+      <div className="border-b border-neutral-200 bg-neutral-50 px-3 py-2 flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setDrawerOpen(true)}
+            className="w-9 h-9 flex items-center justify-center rounded-lg bg-neutral-800 text-white text-sm"
+          >
+            ☰
+          </button>
+          <button onClick={handleUndo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Undo</button>
+          <button onClick={handleRedo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Redo</button>
+          <button onClick={handleExport} className="px-3 py-2 bg-emerald-600 text-white text-sm rounded">Export</button>
+          <span className="ml-auto text-sm text-neutral-500 truncate max-w-[100px]">{projectName}</span>
+        </div>
+
+        {oneSelected && !draft && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <button onClick={startDraftForSelected} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">
+              Edit X/Y
+            </button>
+            <button
+              onClick={() => handleDeleteVertex(oneSelected)}
+              className="px-3 py-2 bg-red-700 text-white text-sm rounded"
+            >
+              Delete Vertex
+            </button>
+            {canSplit && (
+              <button
+                onClick={() => handleSplit(oneSelected)}
+                className="px-3 py-2 bg-amber-600 text-white text-sm rounded"
+              >
+                Split
+              </button>
+            )}
+          </div>
+        )}
+
+        {twoSelected && !draft && (
+          <div className="flex items-center gap-2">
+            <button onClick={handleMerge} className="px-3 py-2 bg-indigo-700 text-white text-sm rounded">
+              Merge
+            </button>
+          </div>
+        )}
+
+        {draft && (
+          <div className="flex gap-2 items-center flex-wrap bg-white border border-neutral-300 p-2 rounded">
+            <label className="text-sm">
+              X:
+              <input
+                type="number"
+                value={draft.x}
+                onChange={(e) => setDraft({ ...draft, x: Number(e.target.value) })}
+                className="ml-1 w-16 bg-neutral-100 px-2 py-1 rounded border border-neutral-300"
+              />
+            </label>
+            <label className="text-sm">
+              Y:
+              <input
+                type="number"
+                value={draft.y}
+                onChange={(e) => setDraft({ ...draft, y: Number(e.target.value) })}
+                className="ml-1 w-16 bg-neutral-100 px-2 py-1 rounded border border-neutral-300"
+              />
+            </label>
+            <button onClick={confirmDraft} className="px-3 py-1 bg-green-600 text-white text-sm rounded">Confirm</button>
+            <button onClick={cancelDraft} className="px-3 py-1 bg-neutral-400 text-white text-sm rounded">Cancel</button>
+          </div>
+        )}
+      </div>
+
+      {/* Canvas */}
       <div className="flex-1 relative overflow-hidden">
         <svg
           ref={svgRef}
@@ -451,126 +528,15 @@ export default function CanvasEditor() {
         </div>
       </div>
 
-      <div className="bg-neutral-100 border-t border-neutral-300 p-3 flex flex-col gap-3 relative">
-        <div className="flex gap-2 flex-wrap items-center">
-          <button
-            onClick={() => setShapeMenuOpen((v) => !v)}
-            className="px-3 py-2 bg-indigo-600 text-white text-sm rounded"
-          >
-            Shapes ▾
-          </button>
-          <button onClick={handleNewProject} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">
-            New
-          </button>
-          <button onClick={handleOpenProjectList} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">
-            Open
-          </button>
-          <button onClick={handleExport} className="px-3 py-2 bg-emerald-600 text-white text-sm rounded">
-            Export
-          </button>
-          <span className="px-2 text-sm text-neutral-600 truncate max-w-[120px]">{projectName}</span>
-        </div>
-
-        <div className="flex gap-2 flex-wrap">
-          <button onClick={handleUndo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Undo</button>
-          <button onClick={handleRedo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Redo</button>
-          <button onClick={handleMerge} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Merge</button>
-          <button
-            onClick={() => selected.length > 0 && handleDeleteVertex(selected[selected.length - 1])}
-            className="px-3 py-2 bg-red-700 text-white text-sm rounded"
-          >
-            Delete Vertex
-          </button>
-          <button onClick={startDraftForSelected} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">
-            Edit Coordinates
-          </button>
-        </div>
-
-        {draft && (
-          <div className="flex gap-2 items-center bg-white border border-neutral-300 p-3 rounded">
-            <label className="text-sm">
-              X:
-              <input
-                type="number"
-                value={draft.x}
-                onChange={(e) => setDraft({ ...draft, x: Number(e.target.value) })}
-                className="ml-1 w-20 bg-neutral-100 px-2 py-1 rounded border border-neutral-300"
-              />
-            </label>
-            <label className="text-sm">
-              Y:
-              <input
-                type="number"
-                value={draft.y}
-                onChange={(e) => setDraft({ ...draft, y: Number(e.target.value) })}
-                className="ml-1 w-20 bg-neutral-100 px-2 py-1 rounded border border-neutral-300"
-              />
-            </label>
-            <button onClick={confirmDraft} className="px-3 py-1 bg-green-600 text-white text-sm rounded">Confirm</button>
-            <button onClick={cancelDraft} className="px-3 py-1 bg-neutral-400 text-white text-sm rounded">Cancel</button>
-          </div>
-        )}
-
-        {selected.length > 0 && (
-          <div className="text-neutral-600 text-xs">Selected: {selected.join(", ")}</div>
-        )}
-      </div>
-
-      {shapeMenuOpen && (
-        <div
-          className="fixed inset-0 bg-black/40 flex items-end z-50"
-          onClick={() => setShapeMenuOpen(false)}
-        >
-          <div
-            className="bg-white w-full rounded-t-2xl p-4 flex flex-col gap-2"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="text-neutral-500 text-xs uppercase tracking-wide mb-1">
-              Choose a shape
-            </div>
-            {Object.entries(PRESETS).map(([key, preset]) => (
-              <button
-                key={key}
-                onClick={() => {
-                  handlePlacePreset(key);
-                  setShapeMenuOpen(false);
-                }}
-                className="text-left px-4 py-3 bg-neutral-100 hover:bg-neutral-200 rounded-lg text-neutral-900"
-              >
-                {preset.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {projectMenuOpen && (
-        <div
-          className="fixed inset-0 bg-black/40 flex items-end z-50"
-          onClick={() => setProjectMenuOpen(false)}
-        >
-          <div
-            className="bg-white w-full rounded-t-2xl p-4 flex flex-col gap-2 max-h-[60vh] overflow-y-auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="text-neutral-500 text-xs uppercase tracking-wide mb-1">
-              Your projects
-            </div>
-            {projects.length === 0 && (
-              <div className="text-neutral-400 text-sm px-4 py-3">No saved projects yet.</div>
-            )}
-            {projects.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => handleOpenProject(p.id)}
-                className="text-left px-4 py-3 bg-neutral-100 hover:bg-neutral-200 rounded-lg text-neutral-900"
-              >
-                {p.name}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      <EditorDrawer
+        open={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        onPlacePreset={handlePlacePreset}
+        onNewProject={handleNewProject}
+        onOpenProject={handleOpenProject}
+        projects={projects}
+        currentProjectId={projectId}
+      />
     </div>
   );
-     }
+        }
