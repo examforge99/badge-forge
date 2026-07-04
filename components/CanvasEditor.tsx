@@ -9,46 +9,50 @@ import {
   moveVertex,
   deleteVertex,
   mergeVertices,
+  translateShape,
 } from "@/lib/canvasEngine";
 import { createHistory, pushHistory, undo, redo, HistoryStack } from "@/lib/history";
 
-function pointsToPath(
-  vertexIds: string[],
-  vertices: CanvasState["vertices"],
-  closed: boolean
-): string {
-  if (vertexIds.length === 0) return "";
-  const coords = vertexIds.map((id) => vertices[id]).filter(Boolean);
-  if (coords.length === 0) return "";
-  const [first, ...rest] = coords;
-  const d = [`M ${first.x} ${first.y}`, ...rest.map((p) => `L ${p.x} ${p.y}`)];
-  if (closed) d.push("Z");
-  return d.join(" ");
+function isPointInPolygon(
+  px: number,
+  py: number,
+  polygon: { x: number; y: number }[]
+): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x, yi = polygon[i].y;
+    const xj = polygon[j].x, yj = polygon[j].y;
+    const intersect =
+      yi > py !== yj > py &&
+      px < ((xj - xi) * (py - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
 }
 
 export default function CanvasEditor() {
   const [state, setState] = useState<CanvasState>(createEmptyState());
   const [history, setHistory] = useState<HistoryStack>(createHistory());
 
-  // Selection: up to two vertex IDs, oldest drops when a third is pressed
   const [selected, setSelected] = useState<string[]>([]);
-
   const [draft, setDraft] = useState<Draft | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // Viewport: camera pan/zoom, never touches vertex coordinates
   const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 8 });
   const panStart = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
 
+  // Shape-drag state: which shape, and where the drag started in model space
+  const shapeDrag = useRef<{ shapeId: string; lastModelX: number; lastModelY: number } | null>(null);
+
   const svgRef = useRef<SVGSVGElement>(null);
   const longPressTimer = useRef<number | null>(null);
+  const longPressFiredRef = useRef(false);
 
   const showNotice = useCallback((msg: string) => {
     setNotice(msg);
     setTimeout(() => setNotice(null), 2000);
   }, []);
 
-  // The one gate every permanent command passes through
   const runCommand = useCallback(
     (fn: () => void) => {
       if (draft !== null) {
@@ -111,7 +115,6 @@ export default function CanvasEditor() {
         return;
       }
       const [first, second] = selected;
-      // second (most recently pressed) merges into first (anchor)
       commitStateChange(mergeVertices(state, first, second));
       setSelected([first]);
     });
@@ -150,64 +153,126 @@ export default function CanvasEditor() {
     setDraft(null);
   }
 
-  // Viewport pan handlers — finger drag only ever moves the camera
-  function handlePointerDown(e: React.PointerEvent) {
-    panStart.current = {
-      x: e.clientX,
-      y: e.clientY,
-      vx: viewport.x,
-      vy: viewport.y,
+  function toModel(clientX: number, clientY: number) {
+    const rect = svgRef.current!.getBoundingClientRect();
+    const sx = clientX - rect.left;
+    const sy = clientY - rect.top;
+    return {
+      x: (sx - viewport.x) / viewport.scale,
+      y: -(sy - viewport.y) / viewport.scale,
     };
   }
 
-  function handlePointerMove(e: React.PointerEvent) {
+  function toScreen(x: number, y: number) {
+    return {
+      sx: viewport.x + x * viewport.scale,
+      sy: viewport.y - y * viewport.scale,
+    };
+  }
+
+  function hitTestVertex(modelX: number, modelY: number): string | null {
+    const radiusModel = 10 / viewport.scale;
+    for (const v of Object.values(state.vertices)) {
+      const dx = v.x - modelX;
+      const dy = v.y - modelY;
+      if (Math.sqrt(dx * dx + dy * dy) <= radiusModel) return v.id;
+    }
+    return null;
+  }
+
+  function hitTestShape(modelX: number, modelY: number): string | null {
+    for (const shape of Object.values(state.shapes)) {
+      const poly = shape.vertexIds
+        .map((vid) => state.vertices[vid])
+        .filter(Boolean)
+        .map((v) => ({ x: v.x, y: v.y }));
+      if (poly.length >= 3 && isPointInPolygon(modelX, modelY, poly)) {
+        return shape.id;
+      }
+    }
+    return null;
+  }
+
+  // Background pan — only fires if nothing else claimed the press
+  function handleBackgroundPointerDown(e: React.PointerEvent) {
+    const { x: mx, y: my } = toModel(e.clientX, e.clientY);
+    if (hitTestVertex(mx, my)) return; // vertex circles handle their own events
+    const shapeId = hitTestShape(mx, my);
+    if (shapeId) return; // shape body handled below via its own long-press
+    panStart.current = { x: e.clientX, y: e.clientY, vx: viewport.x, vy: viewport.y };
+  }
+
+  function handleBackgroundPointerMove(e: React.PointerEvent) {
+    if (shapeDrag.current) {
+      const { x: mx, y: my } = toModel(e.clientX, e.clientY);
+      const dx = mx - shapeDrag.current.lastModelX;
+      const dy = my - shapeDrag.current.lastModelY;
+      if (dx !== 0 || dy !== 0) {
+        setState((s) => translateShape(s, shapeDrag.current!.shapeId, dx, dy));
+        shapeDrag.current.lastModelX = mx;
+        shapeDrag.current.lastModelY = my;
+      }
+      return;
+    }
     if (!panStart.current) return;
     const dx = e.clientX - panStart.current.x;
     const dy = e.clientY - panStart.current.y;
-    setViewport((vp) => ({
-      ...vp,
-      x: panStart.current!.vx + dx,
-      y: panStart.current!.vy + dy,
-    }));
+    setViewport((vp) => ({ ...vp, x: panStart.current!.vx + dx, y: panStart.current!.vy + dy }));
   }
 
-  function handlePointerUp() {
+  function handleBackgroundPointerUp() {
+    if (shapeDrag.current) {
+      // Commit the shape's new position to history
+      commitStateChange(state);
+      shapeDrag.current = null;
+      return;
+    }
     panStart.current = null;
   }
 
-  function handleZoom(delta: number) {
-    setViewport((vp) => ({
-      ...vp,
-      scale: Math.max(2, Math.min(40, vp.scale + delta)),
-    }));
+  // Long-press on a shape body starts a shape-drag
+  function shapeBodyPointerDown(e: React.PointerEvent, shapeId: string) {
+    e.stopPropagation();
+    longPressFiredRef.current = false;
+    longPressTimer.current = window.setTimeout(() => {
+      longPressFiredRef.current = true;
+      const { x: mx, y: my } = toModel(e.clientX, e.clientY);
+      shapeDrag.current = { shapeId, lastModelX: mx, lastModelY: my };
+    }, 350);
   }
 
-  // Long-press detection on a vertex circle
-  function vertexPointerDown(vertexId: string) {
+  function shapeBodyPointerUp(e: React.PointerEvent) {
+    e.stopPropagation();
+    if (longPressTimer.current) {
+      window.clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+    handleBackgroundPointerUp();
+  }
+
+  function handleZoom(delta: number) {
+    setViewport((vp) => ({ ...vp, scale: Math.max(2, Math.min(40, vp.scale + delta)) }));
+  }
+
+  function vertexPointerDown(e: React.PointerEvent, vertexId: string) {
+    e.stopPropagation();
     longPressTimer.current = window.setTimeout(() => {
       handleLongPressVertex(vertexId);
     }, 450);
   }
 
-  function vertexPointerUp() {
+  function vertexPointerUp(e: React.PointerEvent) {
+    e.stopPropagation();
     if (longPressTimer.current) {
       window.clearTimeout(longPressTimer.current);
       longPressTimer.current = null;
     }
   }
 
-  // Model -> screen projection
-  function toScreen(x: number, y: number) {
-    return {
-      sx: viewport.x + x * viewport.scale,
-      sy: viewport.y - y * viewport.scale, // flip y so positive is up
-    };
-  }
-
   return (
-    <div className="w-full h-screen bg-neutral-950 flex flex-col">
+    <div className="w-full h-screen bg-white flex flex-col">
       {notice && (
-        <div className="bg-amber-600 text-white text-sm px-4 py-2 text-center">
+        <div className="bg-amber-500 text-black text-sm px-4 py-2 text-center">
           {notice}
         </div>
       )}
@@ -215,11 +280,11 @@ export default function CanvasEditor() {
       <div className="flex-1 relative overflow-hidden">
         <svg
           ref={svgRef}
-          className="w-full h-full touch-none bg-neutral-900"
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerUp}
+          className="w-full h-full touch-none bg-white"
+          onPointerDown={handleBackgroundPointerDown}
+          onPointerMove={handleBackgroundPointerMove}
+          onPointerUp={handleBackgroundPointerUp}
+          onPointerLeave={handleBackgroundPointerUp}
         >
           {Object.values(state.shapes).map((shape) => {
             const screenPath = shape.vertexIds
@@ -238,6 +303,8 @@ export default function CanvasEditor() {
                 fill={shape.fill}
                 stroke={shape.stroke}
                 strokeWidth={2}
+                onPointerDown={(e) => shapeBodyPointerDown(e, shape.id)}
+                onPointerUp={shapeBodyPointerUp}
               />
             );
           })}
@@ -251,62 +318,35 @@ export default function CanvasEditor() {
                 cx={sx}
                 cy={sy}
                 r={isSelected ? 10 : 7}
-                fill={isSelected ? "#facc15" : "#fff"}
+                fill={isSelected ? "#f59e0b" : "#111"}
                 stroke="#4f46e5"
                 strokeWidth={2}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  vertexPointerDown(v.id);
-                }}
-                onPointerUp={(e) => {
-                  e.stopPropagation();
-                  vertexPointerUp();
-                }}
+                onPointerDown={(e) => vertexPointerDown(e, v.id)}
+                onPointerUp={vertexPointerUp}
               />
             );
           })}
         </svg>
 
         <div className="absolute bottom-4 right-4 flex flex-col gap-2">
-          <button
-            onClick={() => handleZoom(2)}
-            className="w-10 h-10 bg-neutral-800 text-white rounded-full"
-          >
-            +
-          </button>
-          <button
-            onClick={() => handleZoom(-2)}
-            className="w-10 h-10 bg-neutral-800 text-white rounded-full"
-          >
-            −
-          </button>
+          <button onClick={() => handleZoom(2)} className="w-10 h-10 bg-neutral-800 text-white rounded-full">+</button>
+          <button onClick={() => handleZoom(-2)} className="w-10 h-10 bg-neutral-800 text-white rounded-full">−</button>
         </div>
       </div>
 
-      {/* Toolbar */}
-      <div className="bg-neutral-800 p-3 flex flex-col gap-3">
+      <div className="bg-neutral-100 border-t border-neutral-300 p-3 flex flex-col gap-3">
         <div className="flex gap-2 overflow-x-auto">
           {Object.entries(PRESETS).map(([key, preset]) => (
-            <button
-              key={key}
-              onClick={() => handlePlacePreset(key)}
-              className="px-3 py-2 bg-indigo-600 text-white text-sm rounded whitespace-nowrap"
-            >
+            <button key={key} onClick={() => handlePlacePreset(key)} className="px-3 py-2 bg-indigo-600 text-white text-sm rounded whitespace-nowrap">
               {preset.name}
             </button>
           ))}
         </div>
 
         <div className="flex gap-2 flex-wrap">
-          <button onClick={handleUndo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">
-            Undo
-          </button>
-          <button onClick={handleRedo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">
-            Redo
-          </button>
-          <button onClick={handleMerge} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">
-            Merge
-          </button>
+          <button onClick={handleUndo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Undo</button>
+          <button onClick={handleRedo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Redo</button>
+          <button onClick={handleMerge} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Merge</button>
           <button
             onClick={() => selected.length > 0 && handleDeleteVertex(selected[selected.length - 1])}
             className="px-3 py-2 bg-red-700 text-white text-sm rounded"
@@ -319,40 +359,34 @@ export default function CanvasEditor() {
         </div>
 
         {draft && (
-          <div className="flex gap-2 items-center bg-neutral-900 p-3 rounded">
-            <label className="text-white text-sm">
+          <div className="flex gap-2 items-center bg-white border border-neutral-300 p-3 rounded">
+            <label className="text-sm">
               X:
               <input
                 type="number"
                 value={draft.x}
                 onChange={(e) => setDraft({ ...draft, x: Number(e.target.value) })}
-                className="ml-1 w-20 bg-neutral-700 text-white px-2 py-1 rounded"
+                className="ml-1 w-20 bg-neutral-100 px-2 py-1 rounded border border-neutral-300"
               />
             </label>
-            <label className="text-white text-sm">
+            <label className="text-sm">
               Y:
               <input
                 type="number"
                 value={draft.y}
                 onChange={(e) => setDraft({ ...draft, y: Number(e.target.value) })}
-                className="ml-1 w-20 bg-neutral-700 text-white px-2 py-1 rounded"
+                className="ml-1 w-20 bg-neutral-100 px-2 py-1 rounded border border-neutral-300"
               />
             </label>
-            <button onClick={confirmDraft} className="px-3 py-1 bg-green-600 text-white text-sm rounded">
-              Confirm
-            </button>
-            <button onClick={cancelDraft} className="px-3 py-1 bg-neutral-600 text-white text-sm rounded">
-              Cancel
-            </button>
+            <button onClick={confirmDraft} className="px-3 py-1 bg-green-600 text-white text-sm rounded">Confirm</button>
+            <button onClick={cancelDraft} className="px-3 py-1 bg-neutral-400 text-white text-sm rounded">Cancel</button>
           </div>
         )}
 
         {selected.length > 0 && (
-          <div className="text-neutral-400 text-xs">
-            Selected: {selected.join(", ")}
-          </div>
+          <div className="text-neutral-600 text-xs">Selected: {selected.join(", ")}</div>
         )}
       </div>
     </div>
   );
-}
+      }
