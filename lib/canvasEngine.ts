@@ -143,4 +143,23 @@ export function mergeVertices(
   let next: CanvasState = { ...state, shapes: newShapes };
   next = garbageCollectVertices(next);
   return next;
-                   }
+}
+
+export function translateShape(
+  state: CanvasState,
+  shapeId: string,
+  dx: number,
+  dy: number
+): CanvasState {
+  const shape = state.shapes[shapeId];
+  if (!shape) return state;
+
+  const newVertices = { ...state.vertices };
+  for (const vid of shape.vertexIds) {
+    const v = newVertices[vid];
+    if (v) {
+      newVertices[vid] = { ...v, x: v.x + dx, y: v.y + dy };
+    }
+  }
+  return { ...state, vertices: newVertices };
+}
