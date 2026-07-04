@@ -37,16 +37,15 @@ export default function CanvasEditor() {
   const [selected, setSelected] = useState<string[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [shapeMenuOpen, setShapeMenuOpen] = useState(false);
 
   const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 8 });
   const panStart = useRef<{ x: number; y: number; vx: number; vy: number } | null>(null);
 
-  // Shape-drag state: which shape, and where the drag started in model space
   const shapeDrag = useRef<{ shapeId: string; lastModelX: number; lastModelY: number } | null>(null);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const longPressTimer = useRef<number | null>(null);
-  const longPressFiredRef = useRef(false);
 
   const showNotice = useCallback((msg: string) => {
     setNotice(msg);
@@ -193,12 +192,11 @@ export default function CanvasEditor() {
     return null;
   }
 
-  // Background pan — only fires if nothing else claimed the press
   function handleBackgroundPointerDown(e: React.PointerEvent) {
     const { x: mx, y: my } = toModel(e.clientX, e.clientY);
-    if (hitTestVertex(mx, my)) return; // vertex circles handle their own events
+    if (hitTestVertex(mx, my)) return;
     const shapeId = hitTestShape(mx, my);
-    if (shapeId) return; // shape body handled below via its own long-press
+    if (shapeId) return;
     panStart.current = { x: e.clientX, y: e.clientY, vx: viewport.x, vy: viewport.y };
   }
 
@@ -222,7 +220,6 @@ export default function CanvasEditor() {
 
   function handleBackgroundPointerUp() {
     if (shapeDrag.current) {
-      // Commit the shape's new position to history
       commitStateChange(state);
       shapeDrag.current = null;
       return;
@@ -230,12 +227,9 @@ export default function CanvasEditor() {
     panStart.current = null;
   }
 
-  // Long-press on a shape body starts a shape-drag
   function shapeBodyPointerDown(e: React.PointerEvent, shapeId: string) {
     e.stopPropagation();
-    longPressFiredRef.current = false;
     longPressTimer.current = window.setTimeout(() => {
-      longPressFiredRef.current = true;
       const { x: mx, y: my } = toModel(e.clientX, e.clientY);
       shapeDrag.current = { shapeId, lastModelX: mx, lastModelY: my };
     }, 350);
@@ -334,16 +328,15 @@ export default function CanvasEditor() {
         </div>
       </div>
 
-      <div className="bg-neutral-100 border-t border-neutral-300 p-3 flex flex-col gap-3">
-        <div className="flex gap-2 overflow-x-auto">
-          {Object.entries(PRESETS).map(([key, preset]) => (
-            <button key={key} onClick={() => handlePlacePreset(key)} className="px-3 py-2 bg-indigo-600 text-white text-sm rounded whitespace-nowrap">
-              {preset.name}
-            </button>
-          ))}
-        </div>
-
+      <div className="bg-neutral-100 border-t border-neutral-300 p-3 flex flex-col gap-3 relative">
         <div className="flex gap-2 flex-wrap">
+          <button
+            onClick={() => setShapeMenuOpen((v) => !v)}
+            className="px-3 py-2 bg-indigo-600 text-white text-sm rounded"
+          >
+            Shapes ▾
+          </button>
+
           <button onClick={handleUndo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Undo</button>
           <button onClick={handleRedo} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Redo</button>
           <button onClick={handleMerge} className="px-3 py-2 bg-neutral-700 text-white text-sm rounded">Merge</button>
@@ -387,6 +380,34 @@ export default function CanvasEditor() {
           <div className="text-neutral-600 text-xs">Selected: {selected.join(", ")}</div>
         )}
       </div>
+
+      {shapeMenuOpen && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-end z-50"
+          onClick={() => setShapeMenuOpen(false)}
+        >
+          <div
+            className="bg-white w-full rounded-t-2xl p-4 flex flex-col gap-2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="text-neutral-500 text-xs uppercase tracking-wide mb-1">
+              Choose a shape
+            </div>
+            {Object.entries(PRESETS).map(([key, preset]) => (
+              <button
+                key={key}
+                onClick={() => {
+                  handlePlacePreset(key);
+                  setShapeMenuOpen(false);
+                }}
+                className="text-left px-4 py-3 bg-neutral-100 hover:bg-neutral-200 rounded-lg text-neutral-900"
+              >
+                {preset.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
-      }
+}
