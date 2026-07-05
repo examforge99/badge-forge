@@ -24,9 +24,16 @@ export interface Preset {
   closed: boolean;
 }
 
+export interface ShapeEffect {
+  baseColor: string;
+  mixTarget: "white" | "black"; // tint or shade
+  mixPercentage: number; // 0-100
+}
+
 export interface CanvasState {
   vertices: Record<string, Vertex>;
   shapes: Record<string, ShapeInstance>;
+  effects?: Record<string, ShapeEffect>; // shapeId -> effect, written by /style
 }
 
 export interface Draft {
