@@ -1,9 +1,15 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { CanvasState, ShapeEffect } from "@/types/canvas";
 import { mixColor } from "@/lib/colorMixing";
-import { listProjects, loadProject, createProject, saveProject, ProjectSummary } from "@/lib/projects";
+import {
+  listProjects,
+  loadProject,
+  createProject,
+  saveProject,
+  ProjectSummary,
+} from "@/lib/projects";
 
 export default function StyleEditor() {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -24,7 +30,10 @@ export default function StyleEditor() {
   async function openImportMenu() {
     try {
       const list = await listProjects();
-      setProjects(list);
+      // Never offer an already-styled copy as an import source —
+      // this is what prevented the "(styled) (styled) (styled)" runaway chain.
+      const unstyledOnly = list.filter((p) => !p.name.includes("(styled)"));
+      setProjects(unstyledOnly);
       setImportMenuOpen(true);
     } catch {
       showNotice("Could not load your badges.");
@@ -78,8 +87,34 @@ export default function StyleEditor() {
     return mixColor(effect.baseColor, target, effect.mixPercentage);
   }
 
-  function toScreen(x: number, y: number, scale: number, offset: number) {
-    return { sx: x * scale + offset, sy: -y * scale + offset };
+  // Computes a tight bounding box from the actual imported vertex data,
+  // the same technique exportSvg.ts uses — no guessed/fixed viewport.
+  function computeViewBox(canvasState: CanvasState): {
+    minX: number;
+    minY: number;
+    width: number;
+    height: number;
+  } {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const shape of Object.values(canvasState.shapes)) {
+      for (const vid of shape.vertexIds) {
+        const v = canvasState.vertices[vid];
+        if (!v) continue;
+        minX = Math.min(minX, v.x);
+        minY = Math.min(minY, v.y);
+        maxX = Math.max(maxX, v.x);
+        maxY = Math.max(maxY, v.y);
+      }
+    }
+    if (minX === Infinity) {
+      return { minX: 0, minY: 0, width: 100, height: 100 };
+    }
+    const padding = 3;
+    minX -= padding;
+    minY -= padding;
+    maxX += padding;
+    maxY += padding;
+    return { minX, minY, width: maxX - minX, height: maxY - minY };
   }
 
   return (
@@ -102,46 +137,56 @@ export default function StyleEditor() {
         )}
       </div>
 
-      <div className="flex-1 relative overflow-hidden flex items-center justify-center bg-white">
+      <div className="flex-1 relative overflow-hidden flex items-center justify-center bg-white p-6">
         {!state && (
           <div className="text-neutral-400 text-sm px-6 text-center">
             Import a badge from /build to start styling it. The original stays untouched.
           </div>
         )}
 
-        {state && (
-          <svg viewBox="-20 -20 220 220" className="w-full h-full max-w-md">
-            {Object.values(state.shapes).map((shape) => {
-              const scale = 8;
-              const offset = 100;
-              const points = shape.vertexIds
-                .map((vid) => state.vertices[vid])
-                .filter(Boolean)
-                .map((v) => toScreen(v.x, v.y, scale, offset));
-              if (points.length === 0) return null;
-              const [first, ...rest] = points;
-              const d = [
-                `M ${first.sx} ${first.sy}`,
-                ...rest.map((p) => `L ${p.sx} ${p.sy}`),
-              ];
-              if (shape.closed) d.push("Z");
+        {state &&
+          (() => {
+            const { minX, minY, width, height } = computeViewBox(state);
+            // Flip y so the shape reads right-side-up
+            // (model space has +y up, SVG has +y down)
+            return (
+              <svg
+                viewBox={`${minX} ${-minY - height} ${width} ${height}`}
+                className="w-full h-full max-w-md"
+              >
+                {Object.values(state.shapes).map((shape) => {
+                  const points = shape.vertexIds
+                    .map((vid) => state.vertices[vid])
+                    .filter(Boolean)
+                    .map((v) => ({ sx: v.x, sy: -v.y }));
+                  if (points.length === 0) return null;
+                  const [first, ...rest] = points;
+                  const d = [
+                    `M ${first.sx} ${first.sy}`,
+                    ...rest.map((p) => `L ${p.sx} ${p.sy}`),
+                  ];
+                  if (shape.closed) d.push("Z");
 
-              return (
-                <path
-                  key={shape.id}
-                  d={d.join(" ")}
-                  fill={renderedFillFor(shape.id)}
-                  stroke={shape.stroke}
-                  strokeWidth={1}
-                  onClick={() => setSelectedShapeId(shape.id)}
-                  style={{
-                    outline: selectedShapeId === shape.id ? "2px solid #f59e0b" : "none",
-                  }}
-                />
-              );
-            })}
-          </svg>
-        )}
+                  return (
+                    <path
+                      key={shape.id}
+                      d={d.join(" ")}
+                      fill={renderedFillFor(shape.id)}
+                      stroke={shape.stroke}
+                      strokeWidth={0.3}
+                      onClick={() => setSelectedShapeId(shape.id)}
+                      style={{
+                        outline:
+                          selectedShapeId === shape.id
+                            ? "1px solid #f59e0b"
+                            : "none",
+                      }}
+                    />
+                  );
+                })}
+              </svg>
+            );
+          })()}
       </div>
 
       {selectedShapeId && state && (
@@ -202,7 +247,9 @@ export default function StyleEditor() {
               Import a badge from /build
             </div>
             {projects.length === 0 && (
-              <div className="text-neutral-400 text-sm px-4 py-3">No badges found.</div>
+              <div className="text-neutral-400 text-sm px-4 py-3">
+                No badges found.
+              </div>
             )}
             {projects.map((p) => (
               <button
@@ -218,4 +265,4 @@ export default function StyleEditor() {
       )}
     </div>
   );
-                                                   }
+}
